@@ -1,0 +1,295 @@
+
+
+;; NFT staking POOL contract
+
+;; needs stdlib.fc
+
+
+
+(slice, slice, cell, cell, cell, cell) load_data() {
+    
+    slice ds = get_data().begin_parse();
+
+    return (ds~load_msg_addr(),  ds~load_msg_addr(),     ds~load_ref(),    ds~load_dict(),   ds~load_ref(),   ds~load_ref());
+
+    ;;        admin address,       jetton master,      jetton wallet code,     NFTs,        staking code,     staking params
+
+}
+
+
+() save_data(slice admin_address, slice jetton_master, cell jetton_wallet_code, cell nfts, cell staking_code, cell staking_params) impure inline {
+
+    set_data(begin_cell()
+        .store_slice(admin_address)
+        .store_slice(jetton_master)
+        .store_ref(jetton_wallet_code)
+        .store_dict(nfts)
+        .store_ref(staking_code)
+        .store_ref(staking_params)
+    .end_cell());
+
+}
+
+
+
+
+slice jetton_wallet_address(slice owner, slice jetton_master_address, cell jetton_wallet_code) {
+
+    return begin_cell()
+        .store_uint(4, 3)
+        .store_int(0, 8)
+        .store_uint(cell_hash(begin_cell()
+            .store_uint(0, 2)
+            .store_dict(jetton_wallet_code)
+            .store_dict(begin_cell()
+                .store_coins(0)
+                .store_slice(owner)
+                .store_slice(jetton_master_address)
+                .store_ref(jetton_wallet_code)
+            .end_cell())
+            .store_uint(0, 1)
+        .end_cell()), 256)
+    .end_cell().begin_parse();
+
+}
+
+
+
+cell staking_state_init(slice owner, slice jetton_master_address, cell jetton_wallet_code, cell code) {
+
+    return begin_cell()
+        .store_uint(0, 2)
+        .store_dict(code)
+        .store_dict(begin_cell()
+            .store_slice(my_address())
+            .store_slice(owner)
+            .store_uint(0, 64)
+            .store_dict(new_dict())
+            .store_slice(jetton_master_address)
+            .store_ref(jetton_wallet_code)
+        .end_cell())
+        .store_uint(0, 1)
+    .end_cell();
+
+}
+
+
+slice staking_address(cell state_init) {
+
+    return begin_cell()
+        .store_uint(4, 3)
+        .store_int(0, 8)
+        .store_uint(cell_hash(state_init), 256)
+    .end_cell().begin_parse();
+
+}
+
+
+
+
+() send_stake(slice nft, int query_id, slice to, slice response, slice wallet, int amount, cell body) impure inline {
+
+    var msg = begin_cell()
+        .store_uint(0x10, 6)
+        .store_slice(nft)
+        .store_coins(50000000)
+        .store_uint(1, 107)
+        .store_ref(begin_cell()
+            .store_uint(0x5fcc3d14, 32)
+            .store_uint(query_id, 64)
+            .store_slice(to)
+            .store_slice(response)
+            .store_uint(0, 1)
+            .store_coins(1)
+        .end_cell())
+    .end_cell();
+
+    send_raw_message(msg, 0);
+
+
+    msg = begin_cell()
+        .store_uint(0x10, 6)
+        .store_slice(wallet)
+        .store_coins(90000000)
+        .store_uint(1, 107)
+        .store_ref(begin_cell()
+            .store_uint(0xf8a7ea5, 32)
+            .store_uint(query_id, 64)
+            .store_coins(amount)
+            .store_slice(to)
+            .store_slice(response)
+            .store_uint(0, 1)
+            .store_coins(10000000)
+            .store_uint(1, 1)
+            .store_ref(body)
+        .end_cell())
+    .end_cell();
+
+    send_raw_message(msg, 0);
+
+}
+
+
+
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+
+    if (in_msg_body.slice_empty?()) {
+
+        return ();
+
+    }
+
+    slice msg = in_msg_full.begin_parse();
+
+    msg~load_uint(4);
+
+    slice sender = msg~load_msg_addr();
+
+    msg~load_msg_addr();
+
+    int value = msg~load_coins();
+
+    msg~skip_bits(1);
+    msg~load_coins();
+    msg~load_coins();
+
+    int opcode = in_msg_body~load_uint(32);
+
+
+    var (admin_address, jetton_master, jetton_wallet_code, nfts, staking_code, staking_params) = load_data();
+
+
+
+    if(opcode == 1) {  ;; Deploy staking contract
+
+        throw_unless(400, value >= 50000000); ;; Deploy amount >= 0.05 TON
+
+        cell state_init = staking_state_init(sender, jetton_master, jetton_wallet_code, staking_code);
+        slice address = staking_address(state_init);
+
+        var msg = begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(address)
+            .store_coins(40000000)
+            .store_uint(7, 108)
+            .store_ref(state_init)
+            .store_ref(begin_cell().end_cell());
+
+        send_raw_message(msg.end_cell(), 1);
+
+        return ();
+
+    }
+
+    
+    if(opcode == 0x05138d91) {
+
+        slice nft_addr = sender;
+        
+        nft_addr~load_uint(11);
+
+        (slice rarity_slice, int success) = nfts.udict_get?(256, nft_addr~load_uint(256));
+
+        throw_unless(401, success == -1); ;; NFT now found
+
+        int query_id = in_msg_body~load_uint(64);
+        slice old_owner = in_msg_body~load_msg_addr();
+
+        
+        if(in_msg_body.slice_refs()) {
+
+            slice payload = in_msg_body~load_ref().begin_parse();
+
+
+            if(payload~load_uint(32) == 2) { ;; Stake
+                
+                throw_unless(402, value >= 150000000); ;; Forward payload amount >= 0.15 TON
+
+
+                slice sp = staking_params.begin_parse();
+                int stake_time = payload~load_uint(64);
+                
+                throw_unless(403, stake_time >= sp~load_uint(64)); ;; Stake time >= minimal
+                
+                int month_profit = sp~load_coins();
+                int max_rarity = sp~load_uint(32);
+                int rarity_add = sp~load_uint(32);
+                int rarity = rarity_slice~load_uint(32);
+
+                
+                int final_sum = (month_profit + month_profit * rarity_add * (max_rarity - rarity) / 100 / max_rarity) * stake_time / 2592000;
+
+
+                int current_time = now();
+
+                slice jetton_wallet_addr = jetton_wallet_address(my_address(), jetton_master, jetton_wallet_code);
+
+                cell state_init = staking_state_init(old_owner, jetton_master, jetton_wallet_code, staking_code);
+                slice staking_contract = staking_address(state_init);
+
+
+                send_stake(sender, query_id, staking_contract, old_owner, jetton_wallet_addr, final_sum, begin_cell()
+                    .store_uint(1, 32)
+                    .store_slice(sender)
+                    .store_coins(final_sum)
+                    .store_uint(current_time, 64)
+                    .store_uint(current_time + stake_time, 64)
+                .end_cell());
+                
+            }
+
+
+            return ();
+
+        }
+
+        return ();
+
+    }
+
+
+    if(opcode >= 10) {
+            
+        throw_unless(410, equal_slice_bits(sender, admin_address)); ;; not admin call
+
+
+        if (opcode == 10) { ;; set staking params
+
+            save_data(admin_address, jetton_master, jetton_wallet_code, nfts, staking_code, in_msg_body~load_ref());
+
+            return ();
+
+        }
+        
+        if (opcode == 11) { ;; set NFTs
+            
+            save_data(admin_address, jetton_master, jetton_wallet_code, in_msg_body~load_dict(), staking_code, staking_params);
+
+            return ();
+
+        }
+
+    }
+
+}
+
+
+
+(slice, slice, cell, cell, cell, cell) get_staking_pool_data() method_id {
+
+    return load_data();
+
+}
+
+
+
+slice get_staking_address(slice owner) method_id {
+
+    var (_, jetton_master, jetton_wallet_code, _, staking_code, _) = load_data();
+
+    cell state_init = staking_state_init(owner, jetton_master, jetton_wallet_code, staking_code);
+    
+    return staking_address(state_init);
+
+}
